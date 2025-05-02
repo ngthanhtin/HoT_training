@@ -6,3 +6,9 @@ visualization/
 
 r1_prompting_style.py
 responses.jsonl
+
+__MACOSX/
+__pycache__/
+all_data/
+
+*checkpoints*/
