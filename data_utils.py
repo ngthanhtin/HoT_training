@@ -1,5 +1,5 @@
 from datasets import load_dataset
-import re
+import re, json
 
 SYSTEM_PROMPT = """
 Respond in the following format:
@@ -127,3 +127,49 @@ def process_examples_for_repeating_training(batch):
     
 
     return processed
+
+def load_test_dataset(dataset_name='HoT'):
+    
+    if dataset_name == 'ASDiv':
+        data_path = 'data/ASDiv/test.jsonl'
+        with open(data_path, 'r') as f:
+            data = f.readlines()
+        questions = [json.loads(line)['question'] for line in data]
+        answers = ['no cot' for line in data]
+        gts = [json.loads(line)['answer'] for line in data]
+        
+    if dataset_name == 'GSM8K':
+        data_path = 'data/GSM8K/test.jsonl'
+        with open(data_path, 'r') as f:
+            data = f.readlines()
+        questions = [json.loads(line)['question'] for line in data]
+        answers = [json.loads(line)['answer'] for line in data]
+        gts = [a.split("####")[1].strip() for a in answers]
+    
+    if dataset_name == 'HoT':
+        dataset = load_dataset("groundingauburn/HoT")['train']
+        questions, answers, gts = [], [], []
+        for i in range(len(dataset)):
+            questions.append(dataset[i]["question"])
+            answers.append(dataset[i]["answer"])
+            gts.append(dataset[i]["gt"])
+    
+    if dataset_name == 'break':
+        data_path = 'drop_break/test.jsonl'
+        with open(data_path, 'r') as f:
+            data = f.readlines()
+        questions = [json.loads(line)['question'] for line in data]
+        answers = ['no cot' for line in data]
+        gts = [json.loads(line)['answer'][:][0] for line in data]
+    
+    if dataset_name == 'rag4rag':
+        dataset = load_dataset("m-newhauser/rag4rag")['train']
+        questions, answers, gts = [], [], []
+        for i in range(len(dataset)):
+            if dataset[i]['hallucinated_span'] is None:
+                continue
+            questions.append(dataset[i]["context"] + ' ' + dataset[i]["anchor"])
+            answers.append("no cot")
+            gts.append(dataset[i]["human_positive"])
+            
+    return questions, answers, gts
