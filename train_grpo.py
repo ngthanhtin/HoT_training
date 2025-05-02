@@ -15,12 +15,14 @@ from peft import (
     prepare_model_for_kbit_training,
     TaskType,
 )
-from trl import GRPOConfig, GRPOTrainer, VLLMSampler
+from trl import GRPOConfig, GRPOTrainer
 
 import re
 from tqdm import tqdm
 import wandb
 import random
+from collections import Counter
+from typing import List, Tuple
 
 from data_utils import load_and_preprocess_dataset, qa_formatter, process_examples_for_localization_training, process_examples_for_repeating_training
 
@@ -82,6 +84,9 @@ ANSWER_RE   = re.compile(r"<answer>(.*?)</answer>",   re.S)
 FACT_RE     = re.compile(
     r"<fact(\d+) x1=(\d+) x2=(\d+)>(.*?)</fact\1>", re.S | re.I
 )
+FACT_RE_2     = re.compile(
+        r"<fact(\d+)>(.*?)</fact\1>", re.S | re.I
+    )
 FINAL_ANS_RE = re.compile(r"\{(.*?)\}")      # finds “… {10} …”
 
 def extract_sections(text: str):
@@ -99,7 +104,6 @@ def correctness_reward(prompts, completions, ground_truth, **kw):
 
     outs = []
     for c in completions:
-        # _, body = extract_sections(c[0]["content"])
         outs.append(extract_final_answer(c))
 
     # compare element-wise
@@ -110,7 +114,7 @@ def correctness_reward(prompts, completions, ground_truth, **kw):
             score = 2.0 if float(pred) == float(gold) else 0.0
         # otherwise do a case-insensitive string match
         else:
-            score = 2.0 if pred.strip().lower() == gold.strip().lower() else 0.0
+            score = 2.0 if pred.strip().lower() in gold.strip().lower() else 0.0
         scores.append(score)
 
     return scores          # list[float]  length == batch_size
@@ -168,11 +172,11 @@ def jaccard(a: set[str], b: set[str]) -> float:
 #     return cosine(v1, v2)        # threshold maybe 0.85
 
 
-def span_reward(prompts, completions, **kw) -> list[float]:
+def span_localization_reward(prompts, completions, **kw) -> list[float]:
 
     rewards = []
     θ = 0.7                       # similarity threshold
-
+    
     for prompt, comp in zip(prompts, completions):
         # ----- fetch question tokens ------------------------------------
         q_raw, _ = extract_sections(prompt)
@@ -192,6 +196,126 @@ def span_reward(prompts, completions, **kw) -> list[float]:
 
     return rewards
 
+def span_repeating_reward(prompts, completions, **kw) -> list[float]:
+    # Function to extract parts of the text based on headers
+    def extract_parts(text):
+        # Find the "Reformatted Question" and "Answer" sections
+        question_match = re.search(r"Reformatted Question:(.*?)\nAnswer:", text, re.S)
+        answer_match = re.search(r"Answer:(.*)", text, re.S)
+
+        # Extracting text for each part
+        if question_match:
+            question_text = question_match.group(1).strip()
+        else:
+            question_match = re.search(r"Reformatted Question:(.*?)Answer:", text, re.S)
+            answer_match = re.search(r"Answer:(.*)", text, re.S)
+            
+            if question_match:
+                question_text = question_match.group(1).strip()
+            else:
+                question_text = "Question not found"
+        
+        if answer_match:
+            answer_text = answer_match.group(1).strip()
+        else:
+            answer_text = "Answer not found"
+
+        return question_text, answer_text
+    
+    rewards = []
+    θ = 0.7                       # similarity threshold
+
+    for prompt, comp in zip(prompts, completions):
+        ok, tot = 0, 0
+        # ----- fetch question tokens ------------------------------------
+        reformatted_q, a = extract_parts(comp)
+        # find all facts in the reformatted question
+        q_facts = FACT_RE_2.findall(reformatted_q)
+        # find all facts in the answer
+        a_facts = FACT_RE_2.findall(a)
+        # ----- evaluate ONE completion (first candidate) ----------------
+        for fid, txt in q_facts:
+            
+            # find the corresponding fact in the answer
+            for fid_2, txt_2 in a_facts:
+                if fid == fid_2:
+                    tot += 1
+                    sim        = jaccard(toks(txt), toks(txt_2))
+                    if sim >= θ:
+                        ok += 1
+                        
+        # avoid divide-by-zero when no facts are present
+        rewards.append(ok / tot if tot else 0.0)
+
+    return rewards
+
+# reward for training from scratch
+def parse_fact_ids(text:str)->Counter:
+    """returns Counter({'1':n1,'2':n2,..}) of fact ids in a chunk"""
+    return Counter(fid for fid,_ in FACT_RE_2.findall(text))
+
+
+def two_part_span_reward(prompts, completions, answer, **kwargs) -> List[float]:
+    """
+    Gives up to +1.0 if the completion:
+      • has <question>...</question> and <answer>...</answer>
+      • reproduces *all* gold fact ids in *both* parts
+    Small penalty for hallucinated fact ids.
+    """
+    def extract_parts(text):
+        # Find the "Reformatted Question" and "Answer" sections
+        question_match = re.search(r"Reformatted Question:(.*?)\nAnswer:", text, re.S)
+        answer_match = re.search(r"Answer:(.*)", text, re.S)
+
+        # Extracting text for each part
+        if question_match:
+            question_text = question_match.group(1).strip()
+        else:
+            question_match = re.search(r"Reformatted Question:(.*?)Answer:", text, re.S)
+            answer_match = re.search(r"Answer:(.*)", text, re.S)
+            
+            if question_match:
+                question_text = question_match.group(1).strip()
+            else:
+                question_text = "Question not found"
+        
+        if answer_match:
+            answer_text = answer_match.group(1).strip()
+        else:
+            answer_text = "Answer not found"
+
+        return question_text, answer_text
+    # ---------- gold info ----------
+    gold_text = answer[0]
+    gq_match, ga_match = extract_parts(gold_text)
+
+    gold_ids = set(parse_fact_ids(gq_match))  # same ids appear in answer too
+
+    # ---------- per‑completion reward ----------
+    out = []
+    for comp in completions:
+        q_match, a_match = extract_parts(comp)
+        if not (q_match and a_match):
+            out.append(0.0)           # missing wrapper → no reward
+            continue
+
+        pred_q_ids = set(parse_fact_ids(q_match))
+        pred_a_ids = set(parse_fact_ids(a_match))
+
+        # coverage: must tag every gold id in *both* blocks
+        good_q = gold_ids <= pred_q_ids          # recall in question part
+        good_a = gold_ids <= pred_a_ids          # recall in answer part
+        coverage = 1.0 if (good_q and good_a) else 0.0  # you can soften if desired
+
+        # hallucination penalty (optional)
+        extra_ids = (pred_q_ids | pred_a_ids) - gold_ids
+        penalty = 0.1 * len(extra_ids)           # −0.1 per spurious id
+
+        reward = max(coverage - penalty, 0.0)
+        out.append(reward)
+
+    return out
+
 def make_prompt_dataset(data_type="localization"):
     print("Loading dataset...")
     train_ds, val_ds, test_ds = load_and_preprocess_dataset(no_test_split=True)
@@ -205,9 +329,9 @@ def make_prompt_dataset(data_type="localization"):
         processed_train = process_examples_for_repeating_training(train_ds)
         processed_val = process_examples_for_repeating_training(val_ds)
     
-    train_rows = [{"prompt": f"<question>{q['input']}</question>", 'ground_truth': q['gt']}
+    train_rows = [{"prompt": f"<question>{q['input']}</question>", 'ground_truth': q['gt'], 'answer': q['output']}
             for q in processed_train]
-    val_rows = [{"prompt": f"<question>{q['input']}</question>", 'ground_truth': q['gt']}
+    val_rows = [{"prompt": f"<question>{q['input']}</question>", 'ground_truth': q['gt'], 'answer': q['output']}
             for q in processed_val]     
 
     train_ds = Dataset.from_list(train_rows)
@@ -220,14 +344,14 @@ def train_with_grpo(sft_model, tokenizer, data_type="localization"):
     train_ds, eval_ds = make_prompt_dataset(data_type=data_type)
 
     grpo_cfg = GRPOConfig(
-        output_dir=f"./grpo_{data_type}_checkpoints",
+        output_dir=f"./grpo_{data_type}_checkpoints_scratch",
         per_device_train_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         learning_rate=1e-5,
         num_train_epochs=3,
         logging_steps=10,
         save_steps=100,
-        beta=0.04,                       # GRPO default (≈ KL weight)
+        beta=0.02,                       # GRPO default (≈ KL weight)
         max_grad_norm = 0.1,
         adam_beta1 = 0.9,
         adam_beta2 = 0.99,
@@ -246,7 +370,7 @@ def train_with_grpo(sft_model, tokenizer, data_type="localization"):
     # ---------------------------------------------------------------------
     trainer = GRPOTrainer(
         model=sft_model,
-        reward_funcs=[correctness_reward, format_reward, xmlcount_reward, span_reward],     # <-- *must* be given
+        reward_funcs=[correctness_reward, format_reward, xmlcount_reward, span_repeating_reward, two_part_span_reward],     # <-- *must* be given
         args=grpo_cfg,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
@@ -254,12 +378,12 @@ def train_with_grpo(sft_model, tokenizer, data_type="localization"):
     )
 
     trainer.train()
-    trainer.save_model("./output/grpo_final_model")
+    trainer.save_model(f"./grpo_{data_type}_checkpoints_scratch/grpo_final_model")
 
 # Main execution flow
 if __name__ == "__main__":
-    data_type = 'localization'  # or 'repeating'
-    sft_model, tokenizer = load_pretrained_model(f"./sft_{data_type}/final_model")
+    data_type = 'repeating'  # or 'repeating'
+    sft_model, tokenizer = load_pretrained_model(f"./sft_{data_type}_checkpoints/final_model")
     final_model = train_with_grpo(sft_model, tokenizer, data_type=data_type)
     
     print("Training completed successfully!")
