@@ -26,7 +26,7 @@ This repository contains PEFT adapter weights fine-tuned from the base model [`Q
 
 ## Input Output Detail
 <div align="center">    
-<img src="figures/teaser.png" alt="Highlighted Chain of Thought Example">
+<img src="input_output.png" alt="Highlighted Chain of Thought Example">
 </div>
 
 ## 💡 Usage
