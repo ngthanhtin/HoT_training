@@ -24,6 +24,11 @@ This repository contains PEFT adapter weights fine-tuned from the base model [`Q
   - `accelerate >= 0.21.0`
 - **Use Case**: Instruction following / downstream adaptation
 
+## Input Output Detail
+<div align="center">    
+<img src="figures/teaser.png" alt="Highlighted Chain of Thought Example">
+</div>
+
 ## 💡 Usage
 
 To load and use this adapter:
