@@ -36,16 +36,42 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 base_model = "Qwen/Qwen2.5-1.5B"
 adapter_path = "your-username/your-repo-name"  # replace with your repo
 
-# Load tokenizer and model
-tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(base_model, trust_remote_code=True)
-model = PeftModel.from_pretrained(model, adapter_path)
+def build_prompt(question: str) -> str:
+    return f"<question>{question}</question>\n<answer>"
 
-# Inference
-prompt = "<question>Once upon a time,</question>"
-inputs = tokenizer(prompt, return_tensors="pt")
-outputs = model.generate(**inputs, max_new_tokens=100)
-print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+# Function to generate response with fact span tagging
+def generate_response_with_fact_spans(question, model, tokenizer, max_length=512):
+    """
+    Generate a response with fact span tags for the given question.
+    
+    Args:
+        question: The input question
+        model: The fine-tuned model
+        tokenizer: The tokenizer
+        max_length: Maximum length of the generated response
+        
+    Returns:
+        Generated response with fact span tags
+    """
+    
+    prompt = build_prompt(question)
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(model.device)
+    
+    # Generate output
+    with torch.no_grad():
+        output = model.generate(
+            input_ids,
+            max_length=max_length,
+            temperature=0.7,
+            do_sample=True,
+            top_p=0.9,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+    
+    # Decode the output
+    response = tokenizer.decode(output[0], skip_special_tokens=True)
+        
+    return response
 ```
 
 If you use this model, please cite:
