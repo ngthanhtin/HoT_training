@@ -34,7 +34,25 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # Paths
 base_model = "Qwen/Qwen2.5-1.5B"
-adapter_path = "your-username/your-repo-name"  # replace with your repo
+MODEL_PATH = "your-username/your-repo-name"  # replace with your trained model path
+
+tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+    tokenizer.pad_token = tokenizer.eos_token
+    
+    # Load the base model
+    model = AutoModelForCausalLM.from_pretrained(
+        base_model_name,
+        torch_dtype=torch.float16,
+        device_map="auto"
+    )
+    
+    # Load the PEFT configuration and adapter weights
+    peft_config = PeftConfig.from_pretrained(MODEL_PATH)
+    model = PeftModel.from_pretrained(model, MODEL_PATH)
+    model.config.pad_token_id = tokenizer.pad_token_id
+    model.eval()
+    
+    print(f"Model loaded successfully from {MODEL_PATH}")
 
 def build_prompt(question: str) -> str:
     return f"<question>{question}</question>\n<answer>"
